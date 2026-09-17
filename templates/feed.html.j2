@@ -32,6 +32,7 @@
     <a href="{{ url_for('feed', sort='new', show=current_show) }}" class="btn {% if current_sort == 'new' %}btn-primary{% else %}btn-light{% endif %}">New</a>
     <a href="{{ url_for('feed', sort='popular', show=current_show) }}" class="btn {% if current_sort == 'popular' %}btn-primary{% else %}btn-light{% endif %}">Popular</a>
     <a href="{{ url_for('feed', sort='recommended', show=current_show) }}" class="btn {% if current_sort == 'recommended' %}btn-primary{% else %}btn-light{% endif %}">Recommended</a>
+    <a href="{{ url_for('feed', sort='gaming', show=current_show) }}" class="btn {% if current_sort == 'gaming' %}btn-primary{% else %}btn-light{% endif %}">Gaming</a>
   </div>
 
   <!-- This is the 'show' filter for All / Following -->

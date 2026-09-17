@@ -78,6 +78,18 @@ def query_db(query, args=(), one=False, commit=False):
         print(f"Database error: {e}")
         return None
 
+
+def matches_gaming_keyword(content):
+    if not content:
+        return False
+
+    normalized = content.lower()
+    normalized = re.sub(r'#\w+', ' ', normalized)
+    normalized = re.sub(r'[^a-z\s]', ' ', normalized)
+    words = set(normalized.split())
+    return bool(words & {'gaming', 'gamer', 'games', 'game'})
+
+
 @app.template_filter('datetimeformat')
 def datetimeformat(value):
     if isinstance(value, datetime):
@@ -113,10 +125,14 @@ def feed():
     params = []
 
     #  2. Build the Query 
-    where_clause = ""
+    conditions = []
     if show == 'following' and current_user_id:
-        where_clause = "WHERE p.user_id IN (SELECT followed_id FROM follows WHERE follower_id = ?)"
+        conditions.append("p.user_id IN (SELECT followed_id FROM follows WHERE follower_id = ?)")
         params.append(current_user_id)
+
+    where_clause = ""
+    if conditions:
+        where_clause = "WHERE " + " AND ".join(conditions)
 
     # Add the pagination parameters to the query arguments
     pagination_params = (POSTS_PER_PAGE, offset)
@@ -138,6 +154,17 @@ def feed():
         posts = query_db(query, final_params)
     elif sort == 'recommended':
         posts = recommend(current_user_id, show == 'following' and current_user_id)
+    elif sort == 'gaming':
+        query = f"""
+            SELECT p.id, p.content, p.created_at, u.username, u.id as user_id
+            FROM posts p
+            JOIN users u ON p.user_id = u.id
+            {where_clause}
+            ORDER BY p.created_at DESC
+        """
+        all_posts = query_db(query, params)
+        posts = [post for post in all_posts if matches_gaming_keyword(post['content'])]
+        posts = posts[offset:offset + POSTS_PER_PAGE]
     else:  # Default sort is 'new'
         query = f"""
             SELECT p.id, p.content, p.created_at, u.username, u.id as user_id
