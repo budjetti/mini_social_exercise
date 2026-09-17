@@ -80,12 +80,23 @@ def query_db(query, args=(), one=False, commit=False):
 
 
 def matches_gaming_keyword(content):
+    # Ignore empty posts immediately.
     if not content:
         return False
 
+    # Convert the content to lowercase so the match is case-insensitive.
     normalized = content.lower()
+
+    # Remove hashtags such as #gaming so they do not count as matching words.
     normalized = re.sub(r'#\w+', ' ', normalized)
+
+    # Replace punctuation and other non-letter characters with spaces,
+    # leaving only plain letters and spaces for exact word matching.
     normalized = re.sub(r'[^a-z\s]', ' ', normalized)
+
+    # Split into words and compare against the allowed gaming terms.
+    # This ensures matches are whole words like "game" or "gamer",
+    # not partial strings like "gamering".
     words = set(normalized.split())
     return bool(words & {'gaming', 'gamer', 'games', 'game'})
 
