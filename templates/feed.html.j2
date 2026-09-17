@@ -48,6 +48,12 @@
   
 </div>
 
+{% if current_sort == 'gaming' %}
+  <div class="text-center text-muted mb-4 fst-italic">
+    Tell us about your latest gaming experience!
+  </div>
+{% endif %}
+
 <div class="col-md-8 mx-auto">
   {% for entry in posts %}
   <div class="card mb-4" id="post-{{ entry.post.id }}">
