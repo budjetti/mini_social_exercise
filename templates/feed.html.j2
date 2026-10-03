@@ -6,6 +6,32 @@
   <img src="{{ url_for('static', filename='icon.png') }}" alt="Logo" style="height: 64px;" class="mb-4">
 </div>
 
+<!-- Show the top ten authors by lifetime reactions, with their three most common reaction emojis. -->
+<div class="col-md-8 mx-auto mb-4">
+  <h3 class="border-bottom pb-2 mb-3">Top Reactions</h3>
+  {% if reaction_leaderboard %}
+  <ol class="list-group list-group-numbered">
+    {% for leader in reaction_leaderboard %}
+    <li class="list-group-item d-flex justify-content-between align-items-center">
+      <a href="/u/{{ leader.username }}" class="text-decoration-none text-dark">{{ user_display(leader.username) }}</a>
+      <span class="d-flex align-items-center gap-3">
+        <span>{{ leader.lifetime_reactions }} reactions</span>
+        <span class="d-flex align-items-center gap-2">
+          {% for reaction in leader.reactions %}
+          <span title="{{ reaction.reaction_type|capitalize }}">
+            {{ reaction_emojis.get(reaction.reaction_type, '👍') }}
+          </span>
+          {% endfor %}
+        </span>
+      </span>
+    </li>
+    {% endfor %}
+  </ol>
+  {% else %}
+  <p class="text-muted mb-0">No reactions yet.</p>
+  {% endif %}
+</div>
+
 {% if session.get('user_id') %}
 <div class="col-md-8 mx-auto mb-4">
   <div class="card shadow-sm">

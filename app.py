@@ -112,6 +112,37 @@ def feed():
     current_user_id = session.get('user_id')
     params = []
 
+    # Rank users by total reactions, then collect their three most common reaction types.
+    reaction_leaderboard = query_db('''
+        SELECT u.id, u.username, COUNT(r.id) AS lifetime_reactions
+        FROM users u
+        JOIN posts p ON p.user_id = u.id
+        JOIN reactions r ON r.post_id = p.id
+        GROUP BY u.id, u.username
+        ORDER BY lifetime_reactions DESC, u.username COLLATE NOCASE ASC, u.id ASC
+        LIMIT 10
+    ''')
+    if reaction_leaderboard:
+        leaderboard_ids = [leader['id'] for leader in reaction_leaderboard]
+        placeholders = ','.join('?' for _ in leaderboard_ids)
+        reaction_rows = query_db(f'''
+            SELECT p.user_id, r.reaction_type, COUNT(*) AS reaction_count
+            FROM posts p
+            JOIN reactions r ON r.post_id = p.id
+            WHERE p.user_id IN ({placeholders})
+            GROUP BY p.user_id, r.reaction_type
+            ORDER BY p.user_id, reaction_count DESC, r.reaction_type ASC
+        ''', leaderboard_ids)
+        reactions_by_user = {user_id: [] for user_id in leaderboard_ids}
+        for reaction in reaction_rows:
+            user_reactions = reactions_by_user[reaction['user_id']]
+            if len(user_reactions) < 3:
+                user_reactions.append(reaction)
+        reaction_leaderboard = [
+            {**dict(leader), 'reactions': reactions_by_user[leader['id']]}
+            for leader in reaction_leaderboard
+        ]
+
     #  2. Build the Query 
     where_clause = ""
     if show == 'following' and current_user_id:
@@ -194,6 +225,7 @@ def feed():
     #  4. Render Template with Pagination Info 
     return render_template('feed.html.j2', 
                            posts=posts_data, 
+                           reaction_leaderboard=reaction_leaderboard,
                            current_sort=sort,
                            current_show=show,
                            page=page, # Pass current page number
@@ -298,6 +330,13 @@ def user_profile(username):
 
     followers_count = query_db('SELECT COUNT(*) as cnt FROM follows WHERE followed_id = ?', (user['id'],), one=True)['cnt']
     following_count = query_db('SELECT COUNT(*) as cnt FROM follows WHERE follower_id = ?', (user['id'],), one=True)['cnt']
+    # Count every reaction attached to a post authored by this profile's user.
+    reactions_count = query_db('''
+        SELECT COUNT(*) as cnt
+        FROM reactions r
+        JOIN posts p ON p.id = r.post_id
+        WHERE p.user_id = ?
+    ''', (user['id'],), one=True)['cnt']
 
     #  NEW: CHECK FOLLOW STATUS 
     is_currently_following = False # Default to False
@@ -320,6 +359,7 @@ def user_profile(username):
                            comments=comments,
                            followers_count=followers_count, 
                            following_count=following_count,
+                           reactions_count=reactions_count,
                            is_following=is_currently_following)
     
 
