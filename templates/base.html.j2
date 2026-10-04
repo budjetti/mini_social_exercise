@@ -81,9 +81,10 @@
   <div class="container">
 {% with messages = get_flashed_messages(with_categories=true) %}
     {% if messages %}
-        <div id="flash-messages" class="position-fixed top-3 end-0 p-3" style="z-index: 1050;">
+      <!-- Keep notifications anchored near the viewport's top-right corner. -->
+        <div id="flash-messages" class="position-fixed top-0 end-0 p-3" style="z-index: 1050;">
             {% for category, message in messages %}
-                <div class="toast align-items-center text-bg-{{ category }} border-0 mb-3 show" role="alert" aria-live="assertive" aria-atomic="true">
+                <div class="toast align-items-center text-bg-{{ 'success' if category == 'first_engagement' else category }} border-0 mb-3 show" data-duration="{{ 5000 if category == 'first_engagement' else 4000 }}" role="alert" aria-live="assertive" aria-atomic="true">
                     <div class="d-flex">
                         <div class="toast-body">
                             {{ message }}
@@ -110,24 +111,96 @@
 </body>
 </html>
 <script>
-    document.addEventListener("DOMContentLoaded", () => {
-        const duration = 4000; // Time in milliseconds
-        const toasts = document.querySelectorAll('.toast');
-        
-        toasts.forEach((toast, index) => {
-            // Animate the progress bar
-            const progressBar = document.querySelector(`#progress-bar-${index + 1}`);
-            if (progressBar) {
-                progressBar.style.transition = `width ${duration}ms linear`;
-                progressBar.style.width = '0%';
-            }
-            
-            // Auto-dismiss after the specified duration
-            setTimeout(() => {
-                toast.classList.remove('show');
-                toast.addEventListener('transitionend', () => toast.remove());
-            }, duration);
-        });
+  const engagementScrollKey = 'engagement-scroll-y';
+
+  function initializeToasts(container = document) {
+    container.querySelectorAll('.toast').forEach((toast) => {
+      if (toast.dataset.initialized) return;
+      toast.dataset.initialized = 'true';
+      const duration = Number(toast.dataset.duration || 4000);
+      const progressBar = toast.querySelector('.progress-bar');
+      if (progressBar) {
+        progressBar.style.transition = `width ${duration}ms linear`;
+        progressBar.style.width = '0%';
+      }
+      setTimeout(() => {
+        toast.classList.remove('show');
+        toast.remove();
+      }, duration);
     });
+  }
+
+  document.addEventListener('DOMContentLoaded', () => {
+    initializeToasts();
+
+    const savedScroll = sessionStorage.getItem(engagementScrollKey);
+    if (savedScroll !== null) {
+      sessionStorage.removeItem(engagementScrollKey);
+      requestAnimationFrame(() => window.scrollTo(0, Number(savedScroll)));
+    }
+  });
+
+  document.addEventListener('submit', async (event) => {
+    const form = event.target;
+    if (!(form instanceof HTMLFormElement)) return;
+
+    const action = new URL(form.action, window.location.href);
+    const isReaction = action.pathname === '/react' || action.pathname === '/unreact';
+    const commentMatch = action.pathname.match(/^\/posts\/(\d+)\/comment$/);
+    if (!isReaction && !commentMatch) return;
+
+    const formData = new FormData(form);
+    const postId = formData.get('post_id') || (commentMatch && commentMatch[1]);
+    if (!postId) return;
+
+    event.preventDefault();
+    const scrollY = window.scrollY;
+    sessionStorage.setItem(engagementScrollKey, String(scrollY));
+
+    try {
+      const response = await fetch(form.action, {
+        method: 'POST',
+        body: formData,
+        headers: { 'X-Requested-With': 'XMLHttpRequest' }
+      });
+      const responseHtml = await response.text();
+      const refreshedPage = new DOMParser().parseFromString(responseHtml, 'text/html');
+      const currentPost = document.getElementById(`post-${postId}`);
+      const refreshedPost = refreshedPage.getElementById(`post-${postId}`);
+
+      if (!response.ok || !currentPost || !refreshedPost) {
+        const responseUrl = new URL(response.url);
+        if (responseUrl.origin === window.location.origin) {
+          window.location.assign(responseUrl.href);
+        } else {
+          window.location.reload();
+        }
+        return;
+      }
+
+      currentPost.replaceWith(refreshedPost);
+      const refreshedFlashes = refreshedPage.getElementById('flash-messages');
+      if (refreshedFlashes) {
+        const currentFlashes = document.getElementById('flash-messages');
+        if (currentFlashes) {
+          currentFlashes.replaceWith(refreshedFlashes);
+        } else {
+          document.querySelector('.content-wrapper .container').prepend(refreshedFlashes);
+        }
+        initializeToasts(refreshedFlashes);
+      }
+
+      const modal = form.closest('.modal');
+      if (modal) {
+        form.reset();
+        bootstrap.Modal.getOrCreateInstance(modal).hide();
+      }
+
+      sessionStorage.removeItem(engagementScrollKey);
+      window.scrollTo(0, scrollY);
+    } catch (error) {
+      window.location.reload();
+    }
+  });
 </script>
 

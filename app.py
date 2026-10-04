@@ -519,6 +519,17 @@ def logout():
     flash('Logged out.', 'info')
     return redirect(url_for('login'))
 
+def is_first_engagement(post_id, user_id):
+    post = query_db('''
+        SELECT p.user_id,
+               NOT EXISTS (SELECT 1 FROM reactions WHERE post_id = p.id)
+               AND NOT EXISTS (SELECT 1 FROM comments WHERE post_id = p.id) AS no_prior_engagement
+        FROM posts p
+        WHERE p.id = ?
+    ''', (post_id,), one=True)
+    return bool(post and post['user_id'] != user_id and post['no_prior_engagement'])
+
+
 @app.route('/posts/<int:post_id>/comment', methods=['POST'])
 def add_comment(post_id):
     """Handles adding a new comment to a specific post."""
@@ -534,11 +545,15 @@ def add_comment(post_id):
 
     # Basic validation to ensure comment is not empty
     if content and content.strip():
+        first_engagement = is_first_engagement(post_id, user_id)
         db = get_db()
         db.execute('INSERT INTO comments (post_id, user_id, content) VALUES (?, ?, ?)',
                    (post_id, user_id, content))
         db.commit()
-        flash('Your comment was added.', 'success')
+        if first_engagement:
+            flash('You were the first user to engage with this post. Great work!', 'first_engagement')
+        else:
+            flash('Your comment was added.', 'success')
     else:
         flash('Comment cannot be empty.', 'warning')
 
@@ -609,11 +624,15 @@ def add_reaction():
         db.execute('UPDATE reactions SET reaction_type = ? WHERE id = ?',
                    (new_reaction_type, existing_reaction['id']))
     else:
+        first_engagement = is_first_engagement(post_id, user_id)
         # Step 3: If it does not exist, INSERT a new reaction.
         db.execute('INSERT INTO reactions (post_id, user_id, reaction_type) VALUES (?, ?, ?)',
                    (post_id, user_id, new_reaction_type))
 
     db.commit()
+
+    if not existing_reaction and first_engagement:
+        flash('You were the first user to engage with this post. Great work!', 'first_engagement')
 
     return redirect(request.referrer or url_for('feed'))
 
@@ -644,10 +663,7 @@ def unreact():
     if existing_reaction:
         db.execute('DELETE FROM reactions WHERE id = ?', (existing_reaction['id'],))
         db.commit()
-        flash("Reaction removed.", "success")
-    else:
-        flash("No reaction to remove.", "info")
-
+    
     return redirect(request.referrer or url_for('feed'))
 
 
