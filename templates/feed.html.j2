@@ -1,6 +1,6 @@
 {% extends "base.html.j2" %}
 {% block content %}
-{% from "macros/user_macros.html.j2" import user_display %}
+{% from "macros/user_macros.html.j2" import user_display, user_avatar %}
 
 <div class="align-center text-center">
   <img src="{{ url_for('static', filename='icon.png') }}" alt="Logo" style="height: 64px;" class="mb-4">
@@ -37,9 +37,13 @@
   <div class="card shadow-sm">
     <div class="card-body">
       <h5 class="card-title">Create a new post</h5>
-      <form action="{{ url_for('add_post') }}" method="POST">
+      <form action="{{ url_for('add_post') }}" method="POST" enctype="multipart/form-data">
         <div class="mb-3">
           <textarea class="form-control" name="content" rows="3" placeholder="What's on your mind, {{ session.get('username') }}?" required></textarea>
+        </div>
+        <div class="mb-3">
+          <label for="post-image" class="form-label">Optional image (up to one)</label>
+          <input id="post-image" class="form-control" type="file" name="image" accept="image/*">
         </div>
         <button type="submit" class="btn btn-primary float-end">Post</button>
       </form>
@@ -78,7 +82,8 @@
   <div class="card mb-4" id="post-{{ entry.post.id }}">
     <div class="card-body">
       <div class="d-flex justify-content-between align-items-center">
-        <h3 class="card-title mb-0">
+        <h3 class="card-title mb-0 d-flex align-items-center">
+          {{ user_avatar(entry.post.user_id, username=entry.post.username, profile_picture=entry.post.profile_picture, size='44px') }}
           {% if entry.followed_poster %}
           <a href="/u/{{ entry.post.user_id }}">{{ user_display(entry.post.username) }}<span class="text-success p-1" data-toggle="tooltip" data-placement="top" title="You are following this user"> ✓ </span>
 </a>
@@ -103,6 +108,12 @@
       </div>
       
       <p class="mt-2">{{ entry.post.content }}</p>
+
+      {% if entry.post.image %}
+      <div class="mt-3 text-center">
+        <img src="{{ url_for('static', filename=entry.post.image) }}" alt="Attached post image" class="img-fluid rounded border" style="max-height: 420px;">
+      </div>
+      {% endif %}
 
       <!-- Reactions Display and Add Reaction Button -->
       <div class="d-flex align-items-center mt-2 mb-2">

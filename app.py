@@ -1,16 +1,21 @@
-from flask import Flask, render_template, request, redirect, url_for, session, flash, g
+from flask import Flask, render_template, request, redirect, url_for, session, flash, g, abort
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
 from cryptography.fernet import Fernet
 import collections
 import json
 import sqlite3
 import hashlib
 import re
+import os
+import uuid
 from datetime import datetime
 
 app = Flask(__name__)
 app.secret_key = '123456789' 
 DATABASE = 'database.sqlite'
+app.config['UPLOAD_FOLDER'] = os.path.join(app.root_path, 'static', 'uploads')
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 # Load censorship data
 # WARNING! The censorship.dat file contains disturbing language when decrypted. 
@@ -78,6 +83,21 @@ def query_db(query, args=(), one=False, commit=False):
         print(f"Database error: {e}")
         return None
 
+
+def ensure_image_schema():
+    """Add optional image columns to users and posts for the media feature."""
+    db = get_db()
+    users_cols = {row['name'] for row in db.execute('PRAGMA table_info(users)')}
+    if 'profile_picture' not in users_cols:
+        db.execute('ALTER TABLE users ADD COLUMN profile_picture TEXT')
+
+    posts_cols = {row['name'] for row in db.execute('PRAGMA table_info(posts)')}
+    if 'image' not in posts_cols:
+        db.execute('ALTER TABLE posts ADD COLUMN image TEXT')
+
+    db.commit()
+
+
 @app.template_filter('datetimeformat')
 def datetimeformat(value):
     if isinstance(value, datetime):
@@ -93,6 +113,31 @@ REACTION_EMOJIS = {
     'wow': '😮', 'sad': '😢', 'angry': '😠',
 }
 REACTION_TYPES = list(REACTION_EMOJIS.keys())
+ALLOWED_IMAGE_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
+
+
+# Ensure the image-related columns exist before any route uses them.
+with app.app_context():
+    ensure_image_schema()
+
+
+def save_uploaded_image(upload_file, subfolder='uploads'):
+    """Save a user-uploaded image and return the relative static path."""
+    if not upload_file or not upload_file.filename:
+        return None
+
+    extension = os.path.splitext(upload_file.filename)[1].lower().lstrip('.')
+    if extension not in ALLOWED_IMAGE_EXTENSIONS:
+        return None
+
+    filename = f"{uuid.uuid4().hex}.{extension}"
+    target_dir = app.config['UPLOAD_FOLDER'] if subfolder == 'uploads' else os.path.join(app.config['UPLOAD_FOLDER'], subfolder)
+    os.makedirs(target_dir, exist_ok=True)
+    target_path = os.path.join(target_dir, filename)
+    upload_file.save(target_path)
+    relative_dir = 'uploads' if subfolder == 'uploads' else subfolder
+    relative_path = os.path.join(relative_dir, filename)
+    return relative_path.replace('\\', '/')
 
 
 @app.route('/')
@@ -155,7 +200,7 @@ def feed():
     if sort == 'popular':
         query = f"""
             SELECT p.id, p.content, p.created_at, u.username, u.id as user_id,
-                   IFNULL(r.total_reactions, 0) as total_reactions
+                   u.profile_picture, p.image, IFNULL(r.total_reactions, 0) as total_reactions
             FROM posts p
             JOIN users u ON p.user_id = u.id
             LEFT JOIN (
@@ -171,7 +216,8 @@ def feed():
         posts = recommend(current_user_id, show == 'following' and current_user_id)
     else:  # Default sort is 'new'
         query = f"""
-            SELECT p.id, p.content, p.created_at, u.username, u.id as user_id
+            SELECT p.id, p.content, p.created_at, u.username, u.id as user_id,
+                   u.profile_picture, p.image
             FROM posts p
             JOIN users u ON p.user_id = u.id
             {where_clause}
@@ -243,21 +289,23 @@ def add_post():
         flash('You must be logged in to create a post.', 'danger')
         return redirect(url_for('login'))
 
-    # Get content from the submitted form
+    # Get content and optional uploaded image from the submitted form.
     content = request.form.get('content')
+    uploaded_image = request.files.get('image')
+    image_path = save_uploaded_image(uploaded_image)
 
-    # Pass the user's content through the moderation function
+    # Pass the user's content through the moderation function.
     moderated_content = content
 
-    # Basic validation to ensure post is not empty
-    if moderated_content and moderated_content.strip():
+    # Basic validation to ensure post is not empty and allow an image-only post.
+    if (moderated_content and moderated_content.strip()) or image_path:
         db = get_db()
-        db.execute('INSERT INTO posts (user_id, content) VALUES (?, ?)',
-                   (user_id, moderated_content))
+        db.execute('INSERT INTO posts (user_id, content, image) VALUES (?, ?, ?)',
+                   (user_id, moderated_content or '', image_path))
         db.commit()
         flash('Your post was successfully created!', 'success')
     else:
-        # This will catch empty posts or posts that were fully censored
+        # This will catch empty posts or posts that were fully censored.
         flash('Post cannot be empty or was fully censored.', 'warning')
 
     # Redirect back to the main feed to see the new post
@@ -312,7 +360,7 @@ def user_profile(username):
     moderated_bio, _ = moderate_content(user.get('profile', ''))
     user['profile'] = moderated_bio
 
-    posts_raw = query_db('SELECT id, content, user_id, created_at FROM posts WHERE user_id = ? ORDER BY created_at DESC', (user['id'],))
+    posts_raw = query_db('SELECT id, content, user_id, created_at, image FROM posts WHERE user_id = ? ORDER BY created_at DESC', (user['id'],))
     posts = []
     for post_raw in posts_raw:
         post = dict(post_raw)
@@ -361,6 +409,35 @@ def user_profile(username):
                            following_count=following_count,
                            reactions_count=reactions_count,
                            is_following=is_currently_following)
+
+
+@app.route('/u/<username>/picture', methods=['POST'])
+def upload_profile_picture(username):
+    """Allow a logged-in user to upload or replace their profile picture."""
+    current_user_id = session.get('user_id')
+    if not current_user_id:
+        flash('You must be logged in to upload a profile picture.', 'danger')
+        return redirect(url_for('login'))
+
+    user = query_db('SELECT id, username FROM users WHERE username = ?', (username,), one=True)
+    if not user:
+        abort(404)
+
+    if user['id'] != current_user_id:
+        flash('You can only update your own profile picture.', 'danger')
+        return redirect(url_for('user_profile', username=username))
+
+    uploaded_file = request.files.get('profile_picture')
+    image_path = save_uploaded_image(uploaded_file)
+    if image_path is None:
+        flash('Please upload a valid image file.', 'warning')
+        return redirect(url_for('user_profile', username=username))
+
+    db = get_db()
+    db.execute('UPDATE users SET profile_picture = ? WHERE id = ?', (image_path, current_user_id))
+    db.commit()
+    flash('Profile picture updated.', 'success')
+    return redirect(url_for('user_profile', username=username))
     
 
 @app.route('/u/<username>/followers')
@@ -394,7 +471,7 @@ def post_detail(post_id):
     """Displays a single post and its comments, with content moderation applied."""
     
     post_raw = query_db('''
-        SELECT p.id, p.content, p.created_at, u.username, u.id as user_id
+        SELECT p.id, p.content, p.created_at, u.username, u.id as user_id, u.profile_picture, p.image
         FROM posts p
         JOIN users u ON p.user_id = u.id
         WHERE p.id = ?

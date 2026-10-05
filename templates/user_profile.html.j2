@@ -1,6 +1,6 @@
 {% extends "base.html.j2" %}
 {% block content %}
-{% from "macros/user_macros.html.j2" import user_display%}
+{% from "macros/user_macros.html.j2" import user_display, user_avatar %}
 
 <div class="container mt-5">
 
@@ -9,7 +9,20 @@
     <div class="row g-0 align-items-center">
       <div class="col-md-12">
         <div class="card-body">
-          <h2 class="card-title">{{ user_display(user.username) }}</h2>
+          <div class="d-flex align-items-center mb-3">
+            {{ user_avatar(user.id, username=user.username, profile_picture=user.profile_picture, size='120px') }}
+            <h2 class="card-title mb-0">{{ user_display(user.username) }}</h2>
+          </div>
+
+          {% if session.user_id == user.id %}
+          <form action="{{ url_for('upload_profile_picture', username=user.username) }}" method="POST" enctype="multipart/form-data" class="mb-3">
+            <div class="d-flex align-items-center gap-2">
+              <input type="file" name="profile_picture" accept="image/*" class="form-control form-control-sm">
+              <button type="submit" class="btn btn-sm btn-primary">Upload</button>
+            </div>
+          </form>
+          {% endif %}
+
           <p class="card-text text-muted mb-3">
             <strong>Location:</strong> {{ user.location or "N/A" }}<br>
             <strong>Birthdate:</strong> {{ user.birthdate or "N/A" }}<br>
@@ -62,7 +75,10 @@
         <a href="{{ url_for('post_detail', post_id=post.id) }}" class="text-decoration-none text-reset">
           <div class="card-body">
             <p class="card-text">{{ post.content|truncate(100, True, '...') }}</p>
-            <small class="text-muted">Posted on {{ post.created_at|datetimeformat }}</small>
+            {% if post.image %}
+            <img src="{{ url_for('static', filename=post.image) }}" alt="Post image" class="img-fluid rounded border mt-2" style="max-height: 220px; width: 100%; object-fit: cover;">
+            {% endif %}
+            <small class="text-muted d-block mt-2">Posted on {{ post.created_at|datetimeformat }}</small>
           </div>
         </a>
       </div>
