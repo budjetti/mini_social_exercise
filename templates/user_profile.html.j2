@@ -13,6 +13,11 @@
             {{ user_avatar(user.id, username=user.username, profile_picture=user.profile_picture, size='120px') }}
             <h2 class="card-title mb-0">{{ user_display(user.username) }}</h2>
           </div>
+          {% if session.get('user_id') and session.get('user_id') != user.id %}
+          <form action="{{ url_for('report_content', content_type='profile', item_id=user.id) }}" method="POST" class="mb-3">
+            <button type="submit" class="btn btn-sm btn-danger">Report</button>
+          </form>
+          {% endif %}
 
           {% if session.user_id == user.id %}
           <form action="{{ url_for('upload_profile_picture', username=user.username) }}" method="POST" enctype="multipart/form-data" class="mb-3">
@@ -98,6 +103,13 @@
             <small class="text-muted d-block mt-2">Posted on {{ post.created_at|datetimeformat }}</small>
           </div>
         </a>
+        {% if session.get('user_id') and session.get('user_id') != post.user_id %}
+        <div class="px-3 pb-3">
+          <form action="{{ url_for('report_content', content_type='post', item_id=post.id) }}" method="POST">
+            <button type="submit" class="btn btn-sm btn-danger">Report</button>
+          </form>
+        </div>
+        {% endif %}
       </div>
     </div>
     {% else %}
@@ -123,6 +135,13 @@
             <small class="text-muted">Commented on {{ comment.created_at|datetimeformat }}</small>
           </div>
         </a>
+        {% if session.get('user_id') and session.get('user_id') != comment.user_id %}
+        <div class="px-3 pb-3">
+          <form action="{{ url_for('report_content', content_type='comment', item_id=comment.id) }}" method="POST">
+            <button type="submit" class="btn btn-sm btn-danger">Report</button>
+          </form>
+        </div>
+        {% endif %}
       </div>
     </div>
     {% else %}

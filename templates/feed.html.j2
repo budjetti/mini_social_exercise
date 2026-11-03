@@ -194,6 +194,11 @@
             <div>
               <strong><a href="/u/{{ comment.username }}">{{ user_display(comment.username) }}</a></strong>
               <p class="mb-0">{{ comment.content }}</p>
+              {% if session.get('user_id') and session.get('user_id') != comment.user_id %}
+              <form action="{{ url_for('report_content', content_type='comment', item_id=comment.id) }}" method="POST" class="mt-2">
+                  <button type="submit" class="btn btn-sm btn-danger">Report</button>
+              </form>
+              {% endif %}
             </div>
             
             {% if session.get('user_id') == comment.user_id or session.get('user_id') == entry.post.user_id %}
@@ -201,7 +206,6 @@
                 <button type="submit" class="btn btn-sm btn-danger" title="Delete Comment">delete</button>
             </form>
             {% endif %}
-
           </div>
         </li>
         {% endfor %}
@@ -212,7 +216,14 @@
         <a href="/posts/{{ entry.post.id }}" class="btn btn-sm btn-light show-comments-btn">
           Show all comments
         </a>
+        <div class="d-flex gap-2">
+          {% if session.get('user_id') and session.get('user_id') != entry.post.user_id %}
+          <form action="{{ url_for('report_content', content_type='post', item_id=entry.post.id) }}" method="POST">
+            <button type="submit" class="btn btn-danger btn-sm">Report</button>
+          </form>
+          {% endif %}
         <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#addCommentModal-{{ entry.post.id }}">Add Comment</button>
+        </div>
       </div>
     </div>
   </div>

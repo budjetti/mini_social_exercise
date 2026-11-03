@@ -85,7 +85,7 @@ def query_db(query, args=(), one=False, commit=False):
 
 
 def ensure_image_schema():
-    """Add optional image columns to users and posts for the media feature."""
+    """Add optional media and reporting columns used by the application."""
     db = get_db()
     users_cols = {row['name'] for row in db.execute('PRAGMA table_info(users)')}
     if 'profile_picture' not in users_cols:
@@ -94,6 +94,17 @@ def ensure_image_schema():
     posts_cols = {row['name'] for row in db.execute('PRAGMA table_info(posts)')}
     if 'image' not in posts_cols:
         db.execute('ALTER TABLE posts ADD COLUMN image TEXT')
+
+    for table in ('users', 'posts', 'comments'):
+        columns = {row['name'] for row in db.execute(f'PRAGMA table_info({table})')}
+        if 'reported' not in columns:
+            db.execute(f'ALTER TABLE {table} ADD COLUMN reported INTEGER NOT NULL DEFAULT 0')
+            columns.add('reported')
+        if 'report_count' not in columns:
+            db.execute(f'ALTER TABLE {table} ADD COLUMN report_count INTEGER NOT NULL DEFAULT 0')
+        db.execute(
+            f'UPDATE {table} SET report_count = 1 WHERE reported = 1 AND report_count = 0'
+        )
 
     db.commit()
 
@@ -359,6 +370,53 @@ def delete_post(post_id):
     flash('Your post was successfully deleted.', 'success')
     # Redirect back to the page the user came from, or the feed as a fallback
     return redirect(request.referrer or url_for('feed'))
+
+
+@app.route('/report/<string:content_type>/<int:item_id>', methods=['POST'])
+def report_content(content_type, item_id):
+    """Mark a post, comment, or profile as reported and return to its page."""
+    if not session.get('user_id'):
+        flash('You must be logged in to report content.', 'danger')
+        return redirect(url_for('login'))
+
+    report_targets = {
+        'post': ('posts', 'Post', 'id, user_id'),
+        'comment': ('comments', 'Comment', 'id, user_id, post_id'),
+        'profile': ('users', 'Profile', 'id AS user_id, username'),
+    }
+    if content_type not in report_targets:
+        abort(404)
+
+    table, label, selected_columns = report_targets[content_type]
+    db = get_db()
+    item = db.execute(
+        f'SELECT {selected_columns} FROM {table} WHERE id = ?',
+        (item_id,)
+    ).fetchone()
+    if item is None:
+        abort(404)
+
+    if item['user_id'] == session['user_id']:
+        flash(f'You cannot report your own {content_type}.', 'warning')
+        if content_type == 'post':
+            return redirect(url_for('post_detail', post_id=item_id))
+        if content_type == 'comment':
+            return redirect(url_for('post_detail', post_id=item['post_id']))
+        return redirect(url_for('user_profile', username=item['username']))
+
+    db.execute(
+        f'UPDATE {table} SET reported = 1, report_count = report_count + 1 WHERE id = ?',
+        (item_id,)
+    )
+    db.commit()
+    flash(f'{label} reported.', 'success')
+
+    if content_type == 'post':
+        return redirect(url_for('post_detail', post_id=item_id))
+    if content_type == 'comment':
+        return redirect(url_for('post_detail', post_id=item['post_id']))
+    return redirect(url_for('user_profile', username=item['username']))
+
 
 @app.route('/u/<username>')
 def user_profile(username):
@@ -864,7 +922,9 @@ def admin_dashboard():
     
     # First, get all users to calculate risk, then apply pagination in Python
     # It's more complex to do this efficiently in SQL if risk calc is Python-side
-    all_users_raw = query_db('SELECT id, username, profile, created_at FROM users')
+    all_users_raw = query_db(
+        'SELECT id, username, profile, created_at, reported, report_count FROM users'
+    )
     all_users = []
     for user in all_users_raw:
         user_dict = dict(user)
@@ -875,7 +935,7 @@ def admin_dashboard():
         user_dict['risk_score'] = min(5.0, round(user_risk_score, 2))
         all_users.append(user_dict)
 
-    all_users.sort(key=lambda x: x['risk_score'], reverse=True)
+    all_users.sort(key=lambda x: (x['reported'], x['risk_score']), reverse=True)
     user_risk_scores = {
         user['id']: user['risk_score']
         for user in all_users
@@ -890,10 +950,10 @@ def admin_dashboard():
     total_posts_pages = (total_posts_count + PAGE_SIZE - 1) // PAGE_SIZE
 
     posts_raw = query_db(f'''
-        SELECT p.id, p.content, p.created_at, u.id as user_id, u.username,
-               u.created_at as user_created_at
+        SELECT p.id, p.content, p.created_at, p.reported, p.report_count, u.id as user_id,
+               u.username, u.created_at as user_created_at
         FROM posts p JOIN users u ON p.user_id = u.id
-        ORDER BY p.id DESC -- Order by ID for consistent pagination before risk sort
+        ORDER BY p.reported DESC, p.id DESC
         LIMIT ? OFFSET ?
     ''', (PAGE_SIZE, posts_offset))
     posts = []
@@ -913,7 +973,7 @@ def admin_dashboard():
         post_dict['risk_score'] = round(final_score, 2)
         posts.append(post_dict)
 
-    posts.sort(key=lambda x: x['risk_score'], reverse=True) # Sort after fetching and scoring
+    posts.sort(key=lambda x: (x['reported'], x['risk_score']), reverse=True)
 
     # --- Comments Tab Data ---
     comments_offset = (comments_page - 1) * PAGE_SIZE
@@ -921,9 +981,10 @@ def admin_dashboard():
     total_comments_pages = (total_comments_count + PAGE_SIZE - 1) // PAGE_SIZE
 
     comments_raw = query_db(f'''
-        SELECT c.id, c.content, c.created_at, u.username, u.created_at as user_created_at
+        SELECT c.id, c.content, c.created_at, c.reported, c.report_count, u.username,
+               u.created_at as user_created_at
         FROM comments c JOIN users u ON c.user_id = u.id
-        ORDER BY c.id DESC -- Order by ID for consistent pagination before risk sort
+        ORDER BY c.reported DESC, c.id DESC
         LIMIT ? OFFSET ?
     ''', (PAGE_SIZE, comments_offset))
     comments = []
@@ -940,7 +1001,7 @@ def admin_dashboard():
         comment_dict['risk_score'] = round(score, 2)
         comments.append(comment_dict)
 
-    comments.sort(key=lambda x: x['risk_score'], reverse=True) # Sort after fetching and scoring
+    comments.sort(key=lambda x: (x['reported'], x['risk_score']), reverse=True)
 
 
     return render_template('admin.html.j2', 
