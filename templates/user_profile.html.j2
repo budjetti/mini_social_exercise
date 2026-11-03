@@ -75,6 +75,23 @@
         <a href="{{ url_for('post_detail', post_id=post.id) }}" class="text-decoration-none text-reset">
           <div class="card-body">
             <p class="card-text">{{ post.content|truncate(100, True, '...') }}</p>
+            {% if session.get('username') == 'admin' %}
+            <small class="d-block text-muted">
+              Content score: {{ post.content_score }} |
+              Post risk score: {{ post.post_risk_score }} |
+              User risk score: {{ post.user_risk_score }} |
+              Risk level:
+              {% if post.risk_level == "HIGH" %}
+                <span class="badge bg-danger">HIGH</span>
+              {% elif post.risk_level == "MEDIUM" %}
+                <span class="badge bg-warning text-dark">MEDIUM</span>
+              {% elif post.risk_level == "LOW" %}
+                <span class="badge bg-info text-dark">LOW</span>
+              {% else %}
+                <span class="badge bg-secondary">NONE</span>
+              {% endif %}
+            </small>
+            {% endif %}
             {% if post.image %}
             <img src="{{ url_for('static', filename=post.image) }}" alt="Post image" class="img-fluid rounded border mt-2" style="max-height: 220px; width: 100%; object-fit: cover;">
             {% endif %}

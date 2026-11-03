@@ -108,6 +108,23 @@
       </div>
       
       <p class="mt-2">{{ entry.post.content }}</p>
+      {% if session.get('username') == 'admin' %}
+      <small class="d-block text-muted">
+        Content score: {{ entry.post.content_score }} |
+        Post risk score: {{ entry.post.post_risk_score }} |
+        User risk score: {{ entry.post.user_risk_score }} |
+        Risk level:
+        {% if entry.post.risk_level == "HIGH" %}
+          <span class="badge bg-danger">HIGH</span>
+        {% elif entry.post.risk_level == "MEDIUM" %}
+          <span class="badge bg-warning text-dark">MEDIUM</span>
+        {% elif entry.post.risk_level == "LOW" %}
+          <span class="badge bg-info text-dark">LOW</span>
+        {% else %}
+          <span class="badge bg-secondary">NONE</span>
+        {% endif %}
+      </small>
+      {% endif %}
 
       {% if entry.post.image %}
       <div class="mt-3 text-center">

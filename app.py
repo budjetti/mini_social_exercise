@@ -200,7 +200,8 @@ def feed():
     if sort == 'popular':
         query = f"""
             SELECT p.id, p.content, p.created_at, u.username, u.id as user_id,
-                   u.profile_picture, p.image, IFNULL(r.total_reactions, 0) as total_reactions
+                   u.profile_picture, u.created_at as user_created_at,
+                   p.image, IFNULL(r.total_reactions, 0) as total_reactions
             FROM posts p
             JOIN users u ON p.user_id = u.id
             LEFT JOIN (
@@ -217,7 +218,7 @@ def feed():
     else:  # Default sort is 'new'
         query = f"""
             SELECT p.id, p.content, p.created_at, u.username, u.id as user_id,
-                   u.profile_picture, p.image
+                   u.profile_picture, u.created_at as user_created_at, p.image
             FROM posts p
             JOIN users u ON p.user_id = u.id
             {where_clause}
@@ -228,6 +229,7 @@ def feed():
         posts = query_db(query, final_params)
 
     posts_data = []
+    user_risk_scores = {}
     for post in posts:
         # Determine if the current user follows the poster
         followed_poster = False
@@ -254,6 +256,16 @@ def feed():
         reactions = query_db('SELECT reaction_type, COUNT(*) as count FROM reactions WHERE post_id = ? GROUP BY reaction_type', (post['id'],))
         comments_raw = query_db('SELECT c.id, c.content, c.created_at, u.username, u.id as user_id FROM comments c JOIN users u ON c.user_id = u.id WHERE c.post_id = ? ORDER BY c.created_at ASC', (post['id'],))
         post_dict = dict(post)
+        if session.get('username') == 'admin':
+            user_id = post_dict['user_id']
+            # Reuse each author's account score across their posts in this feed.
+            if user_id not in user_risk_scores:
+                user_risk_scores[user_id] = user_risk_analysis(user_id)
+            post_dict.update(post_moderation_metrics(
+                post_dict['content'],
+                post_dict['user_created_at'],
+                user_risk_scores[user_id]
+            ))
         post_dict['content'], _ = moderate_content(post_dict['content'])
         comments_moderated = []
         for comment in comments_raw:
@@ -294,14 +306,14 @@ def add_post():
     uploaded_image = request.files.get('image')
     image_path = save_uploaded_image(uploaded_image)
 
-    # Pass the user's content through the moderation function.
-    moderated_content = content
+    # Preserve the original for risk scoring; content is filtered when displayed.
+    content_to_store = content
 
     # Basic validation to ensure post is not empty and allow an image-only post.
-    if (moderated_content and moderated_content.strip()) or image_path:
+    if (content_to_store and content_to_store.strip()) or image_path:
         db = get_db()
         db.execute('INSERT INTO posts (user_id, content, image) VALUES (?, ?, ?)',
-                   (user_id, moderated_content or '', image_path))
+                   (user_id, content_to_store or '', image_path))
         db.commit()
         flash('Your post was successfully created!', 'success')
     else:
@@ -362,8 +374,12 @@ def user_profile(username):
 
     posts_raw = query_db('SELECT id, content, user_id, created_at, image FROM posts WHERE user_id = ? ORDER BY created_at DESC', (user['id'],))
     posts = []
+    # Compute detailed metrics only for admins; regular profile views stay unchanged.
+    user_score = user_risk_analysis(user['id']) if session.get('username') == 'admin' else None
     for post_raw in posts_raw:
         post = dict(post_raw)
+        if user_score is not None:
+            post.update(post_moderation_metrics(post['content'], user['created_at'], user_score))
         moderated_post_content, _ = moderate_content(post['content'])
         post['content'] = moderated_post_content
         posts.append(post)
@@ -471,7 +487,8 @@ def post_detail(post_id):
     """Displays a single post and its comments, with content moderation applied."""
     
     post_raw = query_db('''
-        SELECT p.id, p.content, p.created_at, u.username, u.id as user_id, u.profile_picture, p.image
+        SELECT p.id, p.content, p.created_at, u.username, u.id as user_id,
+               u.profile_picture, u.created_at as user_created_at, p.image
         FROM posts p
         JOIN users u ON p.user_id = u.id
         WHERE p.id = ?
@@ -484,6 +501,12 @@ def post_detail(post_id):
     #  Moderation for the Main Post 
     # Convert the raw database row to a mutable dictionary
     post = dict(post_raw)
+    if session.get('username') == 'admin':
+        post['moderation_metrics'] = post_moderation_metrics(
+            post['content'],
+            post['user_created_at'],
+            user_risk_analysis(post['user_id'])
+        )
     # Unpack the tuple from moderate_content, we only need the moderated content string here
     moderated_post_content, _ = moderate_content(post['content'])
     post['content'] = moderated_post_content
@@ -853,6 +876,10 @@ def admin_dashboard():
         all_users.append(user_dict)
 
     all_users.sort(key=lambda x: x['risk_score'], reverse=True)
+    user_risk_scores = {
+        user['id']: user['risk_score']
+        for user in all_users
+    }
     total_users = len(all_users)
     users = all_users[users_offset : users_offset + PAGE_SIZE]
     total_users_pages = (total_users + PAGE_SIZE - 1) // PAGE_SIZE
@@ -863,7 +890,8 @@ def admin_dashboard():
     total_posts_pages = (total_posts_count + PAGE_SIZE - 1) // PAGE_SIZE
 
     posts_raw = query_db(f'''
-        SELECT p.id, p.content, p.created_at, u.username, u.created_at as user_created_at
+        SELECT p.id, p.content, p.created_at, u.id as user_id, u.username,
+               u.created_at as user_created_at
         FROM posts p JOIN users u ON p.user_id = u.id
         ORDER BY p.id DESC -- Order by ID for consistent pagination before risk sort
         LIMIT ? OFFSET ?
@@ -871,12 +899,14 @@ def admin_dashboard():
     posts = []
     for post in posts_raw:
         post_dict = dict(post)
-        _, base_score = moderate_content(post_dict['content'])
-        final_score = base_score 
-        author_created_dt = post_dict['user_created_at']
-        author_age_days = (datetime.utcnow() - author_created_dt).days
-        if author_age_days < 7:
-            final_score *= 1.5
+        metrics = post_moderation_metrics(
+            post_dict['content'],
+            post_dict['user_created_at'],
+            user_risk_scores[post_dict['user_id']]
+        )
+        post_dict['content_score'] = metrics['content_score']
+        post_dict['user_risk_score'] = metrics['user_risk_score']
+        final_score = metrics['post_risk_score']
         risk_label, risk_sort_key = get_risk_profile(final_score)
         post_dict['risk_label'] = risk_label
         post_dict['risk_sort_key'] = risk_sort_key
@@ -1017,9 +1047,50 @@ def user_risk_analysis(user_id):
         Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
     """
     
-    score = 0
+    db = get_db()
+    user = db.execute(
+        'SELECT profile, created_at FROM users WHERE id = ?',
+        (user_id,)
+    ).fetchone()
+    if user is None:
+        raise LookupError(f'User {user_id} does not exist')
 
-    return score;
+    profile_score = moderate_content(user['profile'])[1]
+    # Average content scores within each content type before applying the specified weights.
+    post_rows = db.execute(
+        'SELECT content FROM posts WHERE user_id = ?',
+        (user_id,)
+    ).fetchall()
+    comment_rows = db.execute(
+        'SELECT content FROM comments WHERE user_id = ?',
+        (user_id,)
+    ).fetchall()
+
+    average_post_score = (
+        sum(moderate_content(post['content'])[1] for post in post_rows) / len(post_rows)
+        if post_rows else 0.0
+    )
+    average_comment_score = (
+        sum(moderate_content(comment['content'])[1] for comment in comment_rows) / len(comment_rows)
+        if comment_rows else 0.0
+    )
+    content_risk_score = profile_score + average_post_score * 3 + average_comment_score
+
+    # Younger accounts receive a larger multiplier, then the final user score is capped.
+    created_at = user['created_at']
+    if isinstance(created_at, str):
+        created_at = datetime.fromisoformat(created_at)
+    if created_at is None:
+        raise ValueError(f'User {user_id} has no account creation timestamp')
+    now = datetime.now(created_at.tzinfo) if created_at.tzinfo else datetime.utcnow()
+    account_age_days = (now - created_at).days
+
+    if account_age_days < 7:
+        content_risk_score *= 1.5
+    elif account_age_days < 30:
+        content_risk_score *= 1.2
+
+    return min(5.0, float(content_risk_score))
 
     
 # Assignment 2.1
@@ -1040,10 +1111,106 @@ def moderate_content(content):
     Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
     """
 
+    if content is None:
+        content = ''
+    if not isinstance(content, str):
+        raise TypeError('Content to moderate must be a string')
+
+    # Severe words and spam phrases remove the entire item and bypass later scoring.
+    for word in TIER1_WORDS:
+        if word and re.search(r'(?<!\w)' + re.escape(word) + r'(?!\w)', content, re.IGNORECASE):
+            return '[content removed due to severe violation]', 5.0
+
+    for phrase in TIER2_PHRASES:
+        if phrase and re.search(re.escape(phrase), content, re.IGNORECASE):
+            return '[content removed due to spam/scam policy]', 5.0
+
+    score = 0.0
     moderated_content = content
-    score = 0
-    
+    # Match common URL forms, including domains that disguise dots as [.].
+    url_pattern = re.compile(
+        r"""(?ix)
+        \b(?:https?://|www\.)[^\s<>()\[\]{}"'`]+
+        |
+        (?<![@\w])
+        (?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.|\[\.\]))+[a-z]{2,}
+        (?::\d+)?
+        (?:/[^\s<>()\[\]{}"'`]*)?
+        (?:\?[^\s<>()\[\]{}"'`]*)?
+        (?:\#[^\s<>()\[\]{}"'`]*)?
+        """
+    )
+    # Keep original-text spans so links still count if their text also matches a mild word.
+    urls = list(url_pattern.finditer(content))
+
+    # Mask every whole-word mild violation and add two points per occurrence.
+    tier3_words = dict.fromkeys(word.casefold() for word in TIER3_WORDS if word)
+    for word in tier3_words:
+        pattern = re.compile(r'(?<!\w)' + re.escape(word) + r'(?!\w)', re.IGNORECASE)
+        matches = list(pattern.finditer(moderated_content))
+        if matches:
+            score += 2.0 * len(matches)
+            moderated_content = pattern.sub(
+                lambda match: '*' * len(match.group(0)),
+                moderated_content
+            )
+
+    if urls:
+        score += 2.0 * len(urls)
+    # Replace from right to left so earlier match offsets remain valid.
+    for match in reversed(urls):
+        url = match.group(0)
+        trimmed_url = url.rstrip('.,!?;:')
+        replacement = '[link removed]' + url[len(trimmed_url):]
+        moderated_content = (
+            moderated_content[:match.start()]
+            + replacement
+            + moderated_content[match.end():]
+        )
+
+    # Score capitalization from the original text; this rule does not alter content.
+    alphabetic_characters = [character for character in content if character.isalpha()]
+    if (
+        len(alphabetic_characters) > 15
+        and sum(character.isupper() for character in alphabetic_characters)
+        / len(alphabetic_characters) > 0.7
+    ):
+        score += 0.5
+
     return moderated_content, score
+
+
+def post_moderation_metrics(content, author_created_at, user_score):
+    """Return the rule-based content and post risk metrics for a post."""
+    content_score = moderate_content(content)[1]
+    if isinstance(author_created_at, str):
+        author_created_at = datetime.fromisoformat(author_created_at)
+    if author_created_at is None:
+        raise ValueError('Post author has no account creation timestamp')
+
+    # Apply the same under-seven-day multiplier used for post and comment risk.
+    now = datetime.now(author_created_at.tzinfo) if author_created_at.tzinfo else datetime.utcnow()
+    post_risk_score = content_score
+    if (now - author_created_at).days < 7:
+        post_risk_score *= 1.5
+
+    # Convert the adjusted numeric score to the dashboard's four risk labels.
+    if post_risk_score >= 5:
+        risk_level = 'HIGH'
+    elif post_risk_score >= 3:
+        risk_level = 'MEDIUM'
+    elif post_risk_score >= 1:
+        risk_level = 'LOW'
+    else:
+        risk_level = 'NONE'
+
+    return {
+        'content_score': round(content_score, 2),
+        'post_risk_score': round(post_risk_score, 2),
+        'user_risk_score': round(user_score, 2),
+        'risk_level': risk_level,
+    }
+
 
 # Coding Assignment #3
 # Assignment 3.1
@@ -1073,4 +1240,3 @@ def recommend(user_id, filter_following):
 
 if __name__ == '__main__':
     app.run(debug=True, port=8080)
-
