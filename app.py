@@ -126,10 +126,124 @@ REACTION_EMOJIS = {
 REACTION_TYPES = list(REACTION_EMOJIS.keys())
 ALLOWED_IMAGE_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
 
+POST_TOPIC_KEYWORDS = {
+    'DIY & Home Projects': (
+        'diy', 'woodworking', 'handy', 'built', 'building', 'fixing', 'repair',
+        'home improvement', 'home decor', 'decor project', 'upcycling',
+        'bookshelf', 'terrarium', 'craft', 'handmade', 'electronics project',
+        'diylife', 'diychallenge', 'diymagic', 'diyproject',
+    ),
+    'Gardening': (
+        'garden', 'gardening', 'plant', 'plants', 'flower', 'flowers',
+        'vegetable garden', 'houseplant', 'terrarium',
+    ),
+    'Food & Cooking': (
+        'food', 'cooking', 'cook', 'cooked', 'recipe', 'meal', 'dinner',
+        'breakfast', 'lunch', 'bake', 'baking', 'vegan', 'chef', 'salad',
+        'coffee', 'cafe', 'chocolate', 'fondue', 'foodie', 'sweet treat',
+    ),
+    'Travel & Adventure': (
+        'travel', 'trip', 'visited', 'visiting', 'vacation', 'holiday',
+        'exploring', 'adventure', 'hike', 'hiking', 'solo trip', 'fjords',
+    ),
+    'Nature & Environment': (
+        'nature', 'wildlife', 'climate', 'environment', 'conservation',
+        'renewable energy', 'sustainability', 'eco', 'forest', 'mountain',
+        'landscape', 'naturelover', 'climatecrisis', 'ecowarrior',
+    ),
+    'Animals & Pets': (
+        'animal', 'animals', 'pet', 'pets', 'dog', 'dogs', 'puppy', 'pup',
+        'cat', 'cats', 'kitten', 'reptile', 'shelter', 'adopt', 'adoption',
+        'reptilelove', 'catlover', 'wildlife sanctuary',
+    ),
+    'Mental Health & Wellbeing': (
+        'mental health', 'wellbeing', 'wellness', 'stress', 'anxiety',
+        'depression', 'self care', 'therapy', 'support group',
+        'mentalhealthawareness', 'mentalhealthmatters',
+    ),
+    'Mindfulness & Personal Growth': (
+        'mindfulness', 'gratitude', 'personal growth', 'self help',
+        'inspiration', 'reflection', 'perspective', 'overthinking',
+        'mindful', 'selfcare', 'spreadkindness',
+    ),
+    'Books & Reading': (
+        'book', 'books', 'reading', 'read', 'reader', 'audiobook', 'ebook',
+        'novel', 'bookworm', 'audiobooklover',
+    ),
+    'Art & Creativity': (
+        'art', 'artist', 'art festival', 'creativity', 'creative', 'painting',
+        'drawing', 'photography', 'design', 'home decor', 'creativechaos',
+    ),
+    'Technology': (
+        'technology', 'tech', 'ai', 'software', 'computer', 'phone', 'app',
+        'electronics', 'bluetooth', 'speaker', 'techtalk', 'techstruggles',
+    ),
+    'Gaming': (
+        'game', 'games', 'gaming', 'gamer', 'video game', 'co op',
+        'virtual world', 'gamingtogether',
+    ),
+    'Parenting & Family': (
+        'parent', 'parenting', 'kid', 'kids', 'child', 'children', 'family',
+        'mother', 'father', 'mom', 'dad', 'parentingwin', 'handyparent',
+    ),
+    'Community & Volunteering': (
+        'community', 'volunteer', 'volunteering', 'charity', 'local',
+        'neighborhood', 'shelter', 'communitysupport', 'naturevolunteer',
+    ),
+    'Music': (
+        'music', 'song', 'songs', 'playlist', 'hip hop', 'pop music',
+        'classical music', 'musician', 'musiclover', 'popvibes',
+    ),
+    'Film & TV': (
+        'movie', 'movies', 'film', 'cinema', 'tv show', 'documentary',
+        'cinemaetiquette',
+    ),
+    'Fitness & Sports': (
+        'fitness', 'gym', 'workout', 'exercise', 'training', 'sports',
+        'football', 'running', 'run', 'squat', 'gym life',
+    ),
+    'Education & Learning': (
+        'education', 'school', 'learning', 'learned', 'study', 'student',
+        'educational reform',
+    ),
+    'News & Politics': (
+        'news', 'politics', 'political', 'policy', 'government', 'election',
+        'reform', 'independence day', 'freedom',
+    ),
+    'Kindness & Relationships': (
+        'kindness', 'friend', 'friends', 'relationship', 'relationships',
+        'good deed', 'spreadkindness', 'kindness',
+    ),
+}
+
+POST_TOPIC_PATTERNS = {
+    topic: tuple(
+        re.compile(
+            r'(?<!\w)'
+            + re.escape(re.sub(r'[^\w]+', ' ', keyword.casefold()).strip()).replace(r'\ ', r'\s+')
+            + r'(?!\w)'
+        )
+        for keyword in keywords
+    )
+    for topic, keywords in POST_TOPIC_KEYWORDS.items()
+}
+
 
 # Ensure the image-related columns exist before any route uses them.
 with app.app_context():
     ensure_image_schema()
+
+
+def classify_post_topics(content):
+    """Return all keyword-based topics found in a post's text and hashtags."""
+    content = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1 \2', content or '')
+    content = re.sub(r'([a-z0-9])([A-Z])', r'\1 \2', content)
+    normalized_content = re.sub(r'[^\w]+', ' ', content.casefold())
+    return [
+        topic
+        for topic, patterns in POST_TOPIC_PATTERNS.items()
+        if any(pattern.search(normalized_content) for pattern in patterns)
+    ]
 
 
 def save_uploaded_image(upload_file, subfolder='uploads'):
@@ -1276,28 +1390,99 @@ def post_moderation_metrics(content, author_created_at, user_score):
 # Coding Assignment #3
 # Assignment 3.1
 def recommend(user_id, filter_following):
-    """
-    Args:
-        user_id: The ID of the current user.
-        filter_following: Boolean, True if we only want to see recommendations from followed users.
+    """Recommend up to five posts using reaction-topic affinity and follows."""
+    db = get_db()
+    posts_query = '''
+        SELECT p.id, p.content, p.created_at, u.username, u.id as user_id,
+               u.profile_picture, u.created_at as user_created_at, p.image
+        FROM posts p
+        JOIN users u ON p.user_id = u.id
+    '''
+    posts_params = []
+    if user_id is not None:
+        posts_query += ' WHERE p.user_id != ?'
+        posts_params.append(user_id)
+    if filter_following and user_id is not None:
+        posts_query += '''
+            AND p.user_id IN (
+                SELECT followed_id FROM follows WHERE follower_id = ?
+            )
+        '''
+        posts_params.append(user_id)
+    posts_query += ' ORDER BY p.created_at DESC, p.id DESC'
+    posts = db.execute(posts_query, posts_params).fetchall()
 
-    Returns:
-        A list of 5 recommended posts, in reverse-chronological order.
+    positive_reaction_weights = {
+        'like': 1.0,
+        'love': 1.5,
+        'laugh': 0.75,
+        'haha': 0.75,
+        'wow': 0.75,
+    }
+    user_reactions = []
+    if user_id is not None:
+        user_reactions = db.execute(
+            '''
+            SELECT r.post_id, r.reaction_type, p.content
+            FROM reactions r
+            JOIN posts p ON p.id = r.post_id
+            WHERE r.user_id = ?
+            ''',
+            (user_id,)
+        ).fetchall()
 
-    To test whether your recommendation algorithm works, let's pretend we like the DIY topic. Here are some users that often post DIY comment and a few example posts. Make sure your account did not engage with anything else. You should test your algorithm with these and see if your recommendation algorithm picks up on your interest in DIY and starts showing related content.
-    
-    Users: @starboy99, @DancingDolphin, @blogger_bob
-    Posts: 1810, 1875, 1880, 2113
-    
-    Materials: 
-    - https://www.nvidia.com/en-us/glossary/recommendation-system/
-    - http://www.configworks.com/mz/handout_recsys_sac2010.pdf
-    - https://www.researchgate.net/publication/227268858_Recommender_Systems_Handbook
-    """
+    topics_by_post = {
+        post['id']: classify_post_topics(post['content'])
+        for post in posts
+    }
+    reacted_post_ids = {reaction['post_id'] for reaction in user_reactions}
+    topics_by_post.update({
+        reaction['post_id']: classify_post_topics(reaction['content'])
+        for reaction in user_reactions
+    })
 
-    recommended_posts = {} 
+    topic_weights = collections.defaultdict(float)
+    for reaction in user_reactions:
+        reaction_weight = positive_reaction_weights.get(reaction['reaction_type'], 0)
+        if not reaction_weight:
+            continue
+        for topic in topics_by_post.get(reaction['post_id'], ()):
+            topic_weights[topic] += reaction_weight
 
-    return recommended_posts;
+    total_topic_weight = sum(topic_weights.values())
+    if total_topic_weight:
+        topic_affinity = {
+            topic: weight / total_topic_weight
+            for topic, weight in topic_weights.items()
+        }
+    else:
+        topic_affinity = {}
+
+    ranked_posts = []
+    for post in posts:
+        if post['id'] in reacted_post_ids:
+            continue
+
+        topics = topics_by_post[post['id']]
+        topic_score = sum(topic_affinity.get(topic, 0) for topic in topics)
+        if topics:
+            topic_score /= len(topics) ** 0.5
+        ranked_posts.append((topic_score, post))
+
+    ranked_posts.sort(
+        key=lambda item: (
+            item[0],
+            str(item[1]['created_at']),
+            item[1]['id'],
+        ),
+        reverse=True
+    )
+    selected_posts = [post for _, post in ranked_posts[:5]]
+    selected_posts.sort(
+        key=lambda post: (str(post['created_at']), post['id']),
+        reverse=True
+    )
+    return selected_posts
 
 if __name__ == '__main__':
     app.run(debug=True, port=8080)
