@@ -1,6 +1,6 @@
 {% extends "base.html.j2" %}
 {% block content %}
-{% from "macros/user_macros.html.j2" import user_display, user_avatar %}
+{% from "macros/user_macros.html.j2" import user_display, user_avatar, quest_tracker_panel %}
 
 <div class="col-md-8 mx-auto pt-4" id="post-{{ post.id }}">
   <div class="card shadow-sm">
@@ -155,5 +155,7 @@
     </div>
   </div>
 </div>
+
+{{ quest_tracker_panel(quest_tracker) }}
 
 {% endblock %}

@@ -1015,6 +1015,21 @@ def user_following(username):
 @app.route('/posts/<int:post_id>')
 def post_detail(post_id):
     """Displays a single post and its comments, with content moderation applied."""
+
+    quest_tracker = []
+    current_user_id = session.get('user_id')
+    if current_user_id:
+        tracked_quest_keys = {
+            row['quest_key']
+            for row in query_db(
+                'SELECT quest_key FROM quest_tracking WHERE user_id = ?',
+                (current_user_id,)
+            )
+        }
+        quest_tracker = [
+            quest for quest in get_user_quests(current_user_id)
+            if quest['key'] in tracked_quest_keys
+        ]
     
     post_raw = query_db('''
         SELECT p.id, p.content, p.created_at, u.username, u.id as user_id,
@@ -1067,7 +1082,8 @@ def post_detail(post_id):
                            reactions=reactions,
                            comments=comments,
                            reaction_emojis=REACTION_EMOJIS,
-                           reaction_types=REACTION_TYPES)
+                           reaction_types=REACTION_TYPES,
+                           quest_tracker=quest_tracker)
 
 @app.route('/about')
 def about():

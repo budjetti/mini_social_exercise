@@ -1,6 +1,7 @@
 {% extends "base.html.j2" %}
 {% block content %}
 {% from "macros/user_macros.html.j2" import user_display, user_avatar %}
+{% from "macros/user_macros.html.j2" import quest_tracker_panel %}
 
 <div class="align-center text-center">
   <img src="{{ url_for('static', filename='icon.png') }}" alt="Logo" style="height: 64px;" class="mb-4">
@@ -266,29 +267,5 @@
     </a>
   </div>
 
-  {% if quest_tracker %}
-  <aside class="position-fixed start-0 top-50 translate-middle-y ms-2"
-         style="width: min(250px, 42vw); max-height: 75vh; overflow-y: auto; z-index: 1020;"
-         aria-label="Tracked quests">
-    <div class="card shadow">
-      <div class="card-header fw-bold">Quest Tracker</div>
-      <div class="card-body p-2">
-        {% for quest in quest_tracker %}
-        <div class="{% if not loop.first %}border-top pt-2 mt-2{% endif %}">
-          <div class="fw-semibold">{{ quest.badge }} {{ quest.description }}</div>
-          <div class="progress mt-2" role="progressbar"
-               aria-label="{{ quest.name }} quest progress"
-               aria-valuenow="{{ quest.progress }}" aria-valuemin="0"
-               aria-valuemax="{{ quest.target }}">
-            <div class="progress-bar {% if quest.completed %}bg-success{% endif %}"
-                 style="width: {{ quest.progress * 100 / quest.target }}%">
-              {{ quest.progress }}/{{ quest.target }}
-            </div>
-          </div>
-        </div>
-        {% endfor %}
-      </div>
-    </div>
-  </aside>
-  {% endif %}
+  {{ quest_tracker_panel(quest_tracker) }}
 {% endblock %}
