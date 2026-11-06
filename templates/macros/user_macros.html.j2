@@ -1,7 +1,7 @@
 {% macro user_display(user_id) %}
   {% set color = loop_color(user_id) %}
   <a href="/u/{{ user_id }}" class="text-decoration-none" style="color: {{ color }};">
-    <span>@{{ user_id }}</span>
+    <span>@{{ display_username(user_id) }}</span>
   </a>
 {% endmacro %}
 

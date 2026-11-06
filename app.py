@@ -6,6 +6,7 @@ import collections
 import json
 import sqlite3
 import hashlib
+import random
 import re
 import os
 import uuid
@@ -85,15 +86,30 @@ def query_db(query, args=(), one=False, commit=False):
 
 
 def ensure_image_schema():
-    """Add optional media and reporting columns used by the application."""
+    """Add optional profile, media, reporting, and quest columns and tables."""
     db = get_db()
     users_cols = {row['name'] for row in db.execute('PRAGMA table_info(users)')}
     if 'profile_picture' not in users_cols:
         db.execute('ALTER TABLE users ADD COLUMN profile_picture TEXT')
+    if 'selected_badge' not in users_cols:
+        db.execute('ALTER TABLE users ADD COLUMN selected_badge TEXT')
 
     posts_cols = {row['name'] for row in db.execute('PRAGMA table_info(posts)')}
     if 'image' not in posts_cols:
         db.execute('ALTER TABLE posts ADD COLUMN image TEXT')
+
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS quest_tracking (
+            user_id INTEGER NOT NULL,
+            quest_key TEXT NOT NULL,
+            PRIMARY KEY (user_id, quest_key)
+        )
+    ''')
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS app_migrations (
+            migration_key TEXT PRIMARY KEY
+        )
+    ''')
 
     for table in ('users', 'posts', 'comments'):
         columns = {row['name'] for row in db.execute(f'PRAGMA table_info({table})')}
@@ -104,6 +120,28 @@ def ensure_image_schema():
             db.execute(f'ALTER TABLE {table} ADD COLUMN report_count INTEGER NOT NULL DEFAULT 0')
         db.execute(
             f'UPDATE {table} SET report_count = 1 WHERE reported = 1 AND report_count = 0'
+        )
+
+    badge_migration = db.execute(
+        'SELECT 1 FROM app_migrations WHERE migration_key = ?',
+        ('randomize_existing_user_badges_v1',)
+    ).fetchone()
+    if not badge_migration:
+        # Give existing accounts one random earned badge, or None, exactly once.
+        for user in db.execute('SELECT id FROM users').fetchall():
+            earned_badges = [
+                quest['key']
+                for quest in get_user_quests(user['id'])
+                if quest['completed']
+            ]
+            selected_badge = random.choice([None, *earned_badges])
+            db.execute(
+                'UPDATE users SET selected_badge = ? WHERE id = ?',
+                (selected_badge, user['id'])
+            )
+        db.execute(
+            'INSERT INTO app_migrations (migration_key) VALUES (?)',
+            ('randomize_existing_user_badges_v1',)
         )
 
     db.commit()
@@ -126,6 +164,211 @@ REACTION_EMOJIS = {
 REACTION_TYPES = list(REACTION_EMOJIS.keys())
 ALLOWED_IMAGE_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
 
+# Quest definitions drive both profile progress displays and earned badge choices.
+# Each kind below is evaluated from existing activity instead of stored counters.
+QUESTS = (
+    {
+        'key': 'new',
+        'name': 'New',
+        'badge': '🌱',
+        'description': 'Join Mini Social!',
+        'target': 1,
+        'kind': 'new',
+    },
+    {
+        'key': 'educated',
+        'name': 'Educated',
+        'badge': '🎓',
+        'description': 'React once, comment once, and post once.',
+        'target': 3,
+        'kind': 'educated',
+    },
+    {
+        'key': 'theatrical',
+        'name': 'Theatrical',
+        'badge': '🎭',
+        'description': 'React to five posts.',
+        'target': 5,
+        'kind': 'reactions',
+    },
+    {
+        'key': 'responsive',
+        'name': 'Responsive',
+        'badge': '💬',
+        'description': 'Comment on five posts.',
+        'target': 5,
+        'kind': 'comments',
+    },
+    {
+        'key': 'talkative',
+        'name': 'Talkative',
+        'badge': '🎤',
+        'description': 'Post five times.',
+        'target': 5,
+        'kind': 'posts',
+    },
+    {
+        'key': 'picturesque',
+        'name': 'Picturesque',
+        'badge': '📷',
+        'description': 'Post an image.',
+        'target': 1,
+        'kind': 'images',
+    },
+    {
+        'key': 'literate',
+        'name': 'Literate',
+        'badge': '✍️',
+        'description': 'Use 100+ words in one post or comment.',
+        'target': 100,
+        'kind': 'words',
+    },
+)
+QUESTS_BY_KEY = {quest['key']: quest for quest in QUESTS}
+
+
+def get_user_quests(user_id):
+    """Calculate live quest progress and completion rates for every user."""
+    db = get_db()
+    users = db.execute('SELECT id FROM users').fetchall()
+    user_metrics = {
+        user['id']: {
+            'posts': 0,
+            'images': 0,
+            'comments': 0,
+            'reactions': 0,
+            'longest_content_words': 0,
+        }
+        for user in users
+    }
+
+    for row in db.execute('''
+        SELECT user_id, COUNT(*) AS post_count,
+               SUM(CASE WHEN image IS NOT NULL AND TRIM(image) != '' THEN 1 ELSE 0 END) AS image_count
+        FROM posts
+        GROUP BY user_id
+    '''):
+        if row['user_id'] in user_metrics:
+            user_metrics[row['user_id']]['posts'] = row['post_count']
+            user_metrics[row['user_id']]['images'] = row['image_count'] or 0
+
+    # Reaction and comment progress counts distinct posts, not repeat actions on one post.
+    for row in db.execute('''
+        SELECT user_id, COUNT(DISTINCT post_id) AS commented_posts
+        FROM comments
+        GROUP BY user_id
+    '''):
+        if row['user_id'] in user_metrics:
+            user_metrics[row['user_id']]['comments'] = row['commented_posts']
+
+    for row in db.execute('''
+        SELECT user_id, COUNT(DISTINCT post_id) AS reacted_posts
+        FROM reactions
+        GROUP BY user_id
+    '''):
+        if row['user_id'] in user_metrics:
+            user_metrics[row['user_id']]['reactions'] = row['reacted_posts']
+
+    # The Literate quest uses the longest single post or comment, not a combined total.
+    for row in db.execute('''
+        SELECT user_id, content FROM posts
+        UNION ALL
+        SELECT user_id, content FROM comments
+    '''):
+        if row['user_id'] in user_metrics:
+            word_count = len(re.findall(r'\b\w+\b', row['content'] or '', re.UNICODE))
+            user_metrics[row['user_id']]['longest_content_words'] = max(
+                user_metrics[row['user_id']]['longest_content_words'],
+                word_count
+            )
+
+    quest_completions = {quest['key']: 0 for quest in QUESTS}
+    current_metrics = user_metrics.get(user_id, {})
+    current_quests = []
+
+    # Educated requires at least one of each action, so its progress has three steps.
+    for metrics in user_metrics.values():
+        metrics['educated'] = sum((
+            metrics['reactions'] > 0,
+            metrics['comments'] > 0,
+            metrics['posts'] > 0,
+        ))
+
+    for quest in QUESTS:
+        kind = quest['kind']
+        for metrics in user_metrics.values():
+            if kind == 'new':
+                completed = True
+            elif kind == 'educated':
+                completed = metrics['educated'] >= quest['target']
+            elif kind == 'reactions':
+                completed = metrics['reactions'] >= quest['target']
+            elif kind == 'comments':
+                completed = metrics['comments'] >= quest['target']
+            elif kind == 'posts':
+                completed = metrics['posts'] >= quest['target']
+            elif kind == 'images':
+                completed = metrics['images'] >= quest['target']
+            else:
+                completed = metrics['longest_content_words'] >= quest['target']
+            quest_completions[quest['key']] += int(completed)
+
+        if kind == 'new':
+            progress = 1
+        elif kind == 'educated':
+            progress = current_metrics.get('educated', 0)
+        elif kind == 'reactions':
+            progress = current_metrics.get('reactions', 0)
+        elif kind == 'comments':
+            progress = current_metrics.get('comments', 0)
+        elif kind == 'posts':
+            progress = current_metrics.get('posts', 0)
+        elif kind == 'images':
+            progress = current_metrics.get('images', 0)
+        else:
+            progress = current_metrics.get('longest_content_words', 0)
+
+        progress = min(progress, quest['target'])
+        # Compare completion counts against the entire registered-user population.
+        completed_count = quest_completions[quest['key']]
+        total_users = len(user_metrics)
+        current_quests.append({
+            **quest,
+            'progress': progress,
+            'completed': progress >= quest['target'],
+            'completed_users': completed_count,
+            'completion_percent': (
+                round(completed_count * 100 / total_users, 1)
+                if total_users else 0
+            ),
+        })
+
+    return current_quests
+
+
+@app.template_global()
+def display_username(username):
+    """Format a username with the badge selected by that account."""
+    if not username:
+        return ''
+    badge_cache = getattr(g, 'username_badges', None)
+    if badge_cache is None:
+        # Cache badge lookups for the request because templates render names repeatedly.
+        badge_cache = {}
+        g.username_badges = badge_cache
+    if username not in badge_cache:
+        user = query_db(
+            'SELECT selected_badge FROM users WHERE username = ?',
+            (username,),
+            one=True
+        )
+        selected_key = user['selected_badge'] if user else None
+        badge_cache[username] = QUESTS_BY_KEY.get(selected_key, {}).get('badge', '')
+    badge = badge_cache[username]
+    return f'{username} {badge}'.rstrip()
+
+
+# Keyword groups provide a simple local classifier for both existing and new posts.
 POST_TOPIC_KEYWORDS = {
     'DIY & Home Projects': (
         'diy', 'woodworking', 'handy', 'built', 'building', 'fixing', 'repair',
@@ -236,6 +479,7 @@ with app.app_context():
 
 def classify_post_topics(content):
     """Return all keyword-based topics found in a post's text and hashtags."""
+    # Split hashtag CamelCase before matching the normalized topic keywords.
     content = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1 \2', content or '')
     content = re.sub(r'([a-z0-9])([A-Z])', r'\1 \2', content)
     normalized_content = re.sub(r'[^\w]+', ' ', content.casefold())
@@ -280,6 +524,20 @@ def feed():
     offset = (page - 1) * POSTS_PER_PAGE
 
     current_user_id = session.get('user_id')
+    quest_tracker = []
+    if current_user_id:
+        tracked_quest_keys = {
+            row['quest_key']
+            for row in query_db(
+                'SELECT quest_key FROM quest_tracking WHERE user_id = ?',
+                (current_user_id,)
+            )
+        }
+        if tracked_quest_keys:
+            quest_tracker = [
+                quest for quest in get_user_quests(current_user_id)
+                if quest['key'] in tracked_quest_keys
+            ]
     params = []
 
     # Rank users by total reactions, then collect their three most common reaction types.
@@ -414,7 +672,8 @@ def feed():
                            page=page, # Pass current page number
                            per_page=POSTS_PER_PAGE, # Pass items per page
                            reaction_emojis=REACTION_EMOJIS,
-                           reaction_types=REACTION_TYPES)
+                           reaction_types=REACTION_TYPES,
+                           quest_tracker=quest_tracker)
 
 @app.route('/posts/new', methods=['POST'])
 def add_post():
@@ -543,6 +802,30 @@ def user_profile(username):
     user = dict(user_raw)
     moderated_bio, _ = moderate_content(user.get('profile', ''))
     user['profile'] = moderated_bio
+    quests = get_user_quests(user['id'])
+    tracked_quest_keys = set()
+    if session.get('user_id') == user['id']:
+        tracked_quest_keys = {
+            row['quest_key']
+            for row in query_db(
+                'SELECT quest_key FROM quest_tracking WHERE user_id = ?',
+                (user['id'],)
+            )
+        }
+        # A quest no longer needs a tracker once its live progress reaches the target.
+        completed_tracked_keys = {
+            quest['key']
+            for quest in quests
+            if quest['completed'] and quest['key'] in tracked_quest_keys
+        }
+        if completed_tracked_keys:
+            db = get_db()
+            db.executemany(
+                'DELETE FROM quest_tracking WHERE user_id = ? AND quest_key = ?',
+                [(user['id'], quest_key) for quest_key in completed_tracked_keys]
+            )
+            db.commit()
+            tracked_quest_keys -= completed_tracked_keys
 
     posts_raw = query_db('SELECT id, content, user_id, created_at, image FROM posts WHERE user_id = ? ORDER BY created_at DESC', (user['id'],))
     posts = []
@@ -596,7 +879,82 @@ def user_profile(username):
                            followers_count=followers_count, 
                            following_count=following_count,
                            reactions_count=reactions_count,
-                           is_following=is_currently_following)
+                           is_following=is_currently_following,
+                           quests=quests,
+                           tracked_quest_keys=tracked_quest_keys)
+
+
+@app.route('/quests/<quest_key>/<action>', methods=['POST'])
+def set_quest_tracking(quest_key, action):
+    user_id = session.get('user_id')
+    if not user_id:
+        flash('You must be logged in to track quests.', 'danger')
+        return redirect(url_for('login'))
+    if quest_key not in QUESTS_BY_KEY or action not in {'track', 'untrack'}:
+        abort(404)
+
+    db = get_db()
+    if action == 'track':
+        quest = next(
+            quest for quest in get_user_quests(user_id)
+            if quest['key'] == quest_key
+        )
+        if quest['completed']:
+            flash('Completed quests cannot be tracked.', 'info')
+        else:
+            # INSERT OR IGNORE makes repeated track requests idempotent.
+            db.execute(
+                'INSERT OR IGNORE INTO quest_tracking (user_id, quest_key) VALUES (?, ?)',
+                (user_id, quest_key)
+            )
+            db.commit()
+            flash(f'{quest["name"]} quest is now tracked.', 'success')
+    else:
+        db.execute(
+            'DELETE FROM quest_tracking WHERE user_id = ? AND quest_key = ?',
+            (user_id, quest_key)
+        )
+        db.commit()
+        flash('Quest untracked.', 'info')
+
+    username = session.get('username')
+    if username:
+        return redirect(url_for('user_profile', username=username))
+    return redirect(url_for('feed'))
+
+
+@app.route('/profile/badge', methods=['POST'])
+def select_profile_badge():
+    user_id = session.get('user_id')
+    username = session.get('username')
+    if not user_id or not username:
+        flash('You must be logged in to select a badge.', 'danger')
+        return redirect(url_for('login'))
+
+    badge_key = request.form.get('badge_key', '')
+    if badge_key:
+        if badge_key not in QUESTS_BY_KEY:
+            abort(400)
+        quest = next(
+            quest for quest in get_user_quests(user_id)
+            if quest['key'] == badge_key
+        )
+        if not quest['completed']:
+            flash('You can only select badges for completed quests.', 'warning')
+            return redirect(url_for('user_profile', username=username))
+        selected_badge = badge_key
+    else:
+        # An empty selection means no badge; the display helper omits its emoji.
+        selected_badge = None
+
+    db = get_db()
+    db.execute(
+        'UPDATE users SET selected_badge = ? WHERE id = ?',
+        (selected_badge, user_id)
+    )
+    db.commit()
+    flash('Profile badge updated.', 'success')
+    return redirect(url_for('user_profile', username=username))
 
 
 @app.route('/u/<username>/picture', methods=['POST'])
@@ -1157,6 +1515,7 @@ def admin_delete_user(user_id):
         return redirect(url_for('admin_dashboard'))
     
     db = get_db()
+    db.execute('DELETE FROM quest_tracking WHERE user_id = ?', (user_id,))
     db.execute('DELETE FROM users WHERE id = ?', (user_id,))
     db.commit()
     flash(f'User {user_id} and all their content has been deleted.', 'success')
@@ -1392,6 +1751,7 @@ def post_moderation_metrics(content, author_created_at, user_score):
 def recommend(user_id, filter_following):
     """Recommend up to five posts using reaction-topic affinity and follows."""
     db = get_db()
+    # Score the whole eligible pool so recommendations are global, not page-limited.
     posts_query = '''
         SELECT p.id, p.content, p.created_at, u.username, u.id as user_id,
                u.profile_picture, u.created_at as user_created_at, p.image
@@ -1431,6 +1791,7 @@ def recommend(user_id, filter_following):
             (user_id,)
         ).fetchall()
 
+    # Classify both eligible candidates and the posts that provide interest signals.
     topics_by_post = {
         post['id']: classify_post_topics(post['content'])
         for post in posts
@@ -1441,6 +1802,7 @@ def recommend(user_id, filter_following):
         for reaction in user_reactions
     })
 
+    # Positive reactions build a weighted profile; neutral/negative reaction types add nothing.
     topic_weights = collections.defaultdict(float)
     for reaction in user_reactions:
         reaction_weight = positive_reaction_weights.get(reaction['reaction_type'], 0)
@@ -1458,6 +1820,8 @@ def recommend(user_id, filter_following):
     else:
         topic_affinity = {}
 
+    # Exclude already-reacted posts and compare topic overlap; broader multi-topic posts
+    # are lightly normalized so they do not win merely by matching many labels.
     ranked_posts = []
     for post in posts:
         if post['id'] in reacted_post_ids:
@@ -1477,6 +1841,7 @@ def recommend(user_id, filter_following):
         ),
         reverse=True
     )
+    # Choose the five best matches, then show that chosen set newest-first.
     selected_posts = [post for _, post in ranked_posts[:5]]
     selected_posts.sort(
         key=lambda post: (str(post['created_at']), post['id']),

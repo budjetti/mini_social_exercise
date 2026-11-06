@@ -39,7 +39,7 @@
       <h5 class="card-title">Create a new post</h5>
       <form action="{{ url_for('add_post') }}" method="POST" enctype="multipart/form-data">
         <div class="mb-3">
-          <textarea class="form-control" name="content" rows="3" placeholder="What's on your mind, {{ session.get('username') }}?" required></textarea>
+          <textarea class="form-control" name="content" rows="3" placeholder="What's on your mind, {{ display_username(session.get('username')) }}?" required></textarea>
         </div>
         <div class="mb-3">
           <label for="post-image" class="form-label">Optional image (up to one)</label>
@@ -265,4 +265,30 @@
       Next &raquo;
     </a>
   </div>
+
+  {% if quest_tracker %}
+  <aside class="position-fixed start-0 top-50 translate-middle-y ms-2"
+         style="width: min(250px, 42vw); max-height: 75vh; overflow-y: auto; z-index: 1020;"
+         aria-label="Tracked quests">
+    <div class="card shadow">
+      <div class="card-header fw-bold">Quest Tracker</div>
+      <div class="card-body p-2">
+        {% for quest in quest_tracker %}
+        <div class="{% if not loop.first %}border-top pt-2 mt-2{% endif %}">
+          <div class="fw-semibold">{{ quest.badge }} {{ quest.description }}</div>
+          <div class="progress mt-2" role="progressbar"
+               aria-label="{{ quest.name }} quest progress"
+               aria-valuenow="{{ quest.progress }}" aria-valuemin="0"
+               aria-valuemax="{{ quest.target }}">
+            <div class="progress-bar {% if quest.completed %}bg-success{% endif %}"
+                 style="width: {{ quest.progress * 100 / quest.target }}%">
+              {{ quest.progress }}/{{ quest.target }}
+            </div>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </aside>
+  {% endif %}
 {% endblock %}
